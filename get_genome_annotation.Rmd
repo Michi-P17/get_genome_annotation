@@ -1,0 +1,312 @@
+---
+title: "Genome Annotation"
+subtitle: "Finding available annotation and retrieving Ensembl gene annotation"
+author: "Michelle Perez-Cuevas"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+```{r setup}
+### Genome annotation: Find & get
+### Alexis Norris
+### Created: 2023-06-22
+### Revised: 2023-07-03
+
+### Install required packages (only need to do once per computer)
+#BiocManager::install("AnnotationHub")
+#BiocManager::install("GenomeInfoDb")
+#BiocManager::install("biomaRt")
+#BiocManager::install("rtracklayer")
+#install.packages("sessioninfo")
+#install.packages("tidyverse")
+
+### Load packages
+library(tidyverse)
+```
+
+# AnnotationHub
+
+Reference: <https://bioconductor.org/packages/devel/bioc/vignettes/AnnotationHub/inst/doc/AnnotationHub.html>
+
+## Load
+
+```{r ah_load}
+### Load the package
+library(AnnotationHub)
+
+### Load the annotation database
+Sys.time()
+ah <- AnnotationHub()
+Sys.time()
+```
+
+## Find what data is available
+
+```{r ah_find}
+### Look what species are available 
+### And subset for only pig
+unique(ah$species)[grep("scrofa", unique(ah$species))]
+ah <- subset(
+  ah, 
+  species %in% c("Sus scrofa", "sus scrofa")
+)
+
+### Find out what types/formats of data are available
+### Note that some are already in GRanges format
+unique(ah$rdataclass)
+
+### Find out what databases/sources are available
+unique(ah$dataprovider)
+
+### Find out what versions of the pig genome are available 
+### And subset for the most recent version (11)
+unique(mcols(ah)$genome)
+ah <- subset(
+  ah, 
+  genome %in% c("susScr11", "Sscrofa11", "Sscrofa11.1")
+)
+
+### Find which datasets are available
+ah_datasets <- data.frame(mcols(ah)) %>%
+  rownames_to_column(var = "AnnotationHub_Dataset_ID")
+head(ah_datasets)
+write_csv(
+  ah_datasets,
+  "AnnotationHub_datasets_susScr11.csv"
+)
+```
+
+## Retrive desired data
+
+```{r ah_retrieve}
+### For our comparison, we will get the Ensembl gene annotation dataset
+Sys.time()
+anno_annotationHub <- ah[["AH105706"]]
+Sys.time()
+```
+
+# biomaRt
+
+Reference: <https://bioconductor.org/packages/release/bioc/vignettes/biomaRt/inst/doc/accessing_ensembl.html>
+
+## Load
+
+```{r biomart_load}
+### Load the package
+library(biomaRt)
+```
+
+## Find what data is available
+
+Here, they're called Pages. And you have attributes (columns) you can select from a given Page (a table)
+
+```{r biomart_find}
+### What versions are available
+### Most of the time we want the newest
+listEnsemblArchives()
+
+### Find databases
+listEnsembl()$biomart
+
+### Choose version and database
+### If "useast" mirror down, use "www" or "asia"
+Sys.time()
+bm_genes <- useEnsembl(
+  biomart = "genes", 
+  version = 109
+)
+Sys.time()
+
+### Find species
+searchDatasets(
+  mart = bm_genes, 
+  pattern = "pig"
+)
+Sys.time()
+bm_genes <- useDataset(
+  mart = bm_genes, 
+  dataset = "sscrofa_gene_ensembl"
+)
+Sys.time()
+
+### Find which datasets/attributes are available
+bm_genes_attributes <- listAttributes(bm_genes)  
+head(bm_genes_attributes)
+table(bm_genes_attributes$page)
+```
+```{r biomart_find_addl}
+### Check annotation available for the other "marts" available
+
+### Mouse strains --> only for mice
+bm_strains <- useEnsembl(
+  biomart = "mouse_strains", 
+  version = 109
+)
+searchDatasets(bm_strains)
+
+### Regulatory --> only for humans and mice
+bm_reg <- useEnsembl(
+  biomart = "regulation", 
+  version = 109
+)
+searchDatasets(bm_reg)
+
+### SNPs --> is available for pig
+bm_snps <- useEnsembl(
+  biomart = "snps", 
+  version = 109
+)
+searchDatasets(mart = bm_snps)
+
+### Get tables of available annotation (genes & snp & structvar)
+bm_snps_snp <- useDataset(
+  mart = bm_snps, 
+  dataset = "sscrofa_snp"
+)
+bm_snps_snp_attributes <- listAttributes(bm_snps_snp)
+table(bm_snps_snp_attributes$page)
+bm_snps_sv <- useDataset(
+  mart = bm_snps, 
+  dataset = "sscrofa_structvar"
+)
+bm_snps_sv_attributes <- listAttributes(bm_snps_sv)
+table(bm_snps_sv_attributes$page)
+
+### Combine and export as one table
+bm_all <- bind_rows(
+  list(
+    "genes" = bm_genes_attributes,
+    "snps" = bind_rows(
+      bm_snps_snp_attributes,
+      bm_snps_sv_attributes
+    )
+  ),
+  .id = "Mart"
+)
+write_csv(
+  bm_all,
+  "biomaRt_datasets_susScr11.csv"
+)
+```
+
+## Retrieve desired data
+
+```{r biomart_retrieve}
+### Get the annotation for selected attributes
+Sys.time()
+anno_biomart <- getBM(
+  attributes = c(
+    "ensembl_gene_id", 
+    "ensembl_transcript_id",
+    "ensembl_peptide_id",
+    "ensembl_exon_id", 
+    "chromosome_name", 
+    "start_position", 
+    "end_position", 
+    "strand", 
+    "gene_biotype"
+  ),  
+  mart = bm_genes
+)
+Sys.time()
+```
+
+# rtracklayer
+
+Reference: <https://bioconductor.org/packages/devel/bioc/vignettes/rtracklayer/inst/doc/rtracklayer.pdf> (see Part 5)
+
+## Load
+
+```{r rtrack_load}
+### Load the package
+library(rtracklayer)
+
+### Load the annotation database
+Sys.time()
+session <- browserSession("UCSC")
+Sys.time()
+```
+
+## Find what data is available
+
+Here, the data are Tables' Tracks from [UCSC Table Browser](https://genome.ucsc.edu/cgi-bin/hgTables?hgsid=1646468690_nm3tICVA49bscHaGtvBWdqxRG6mu)
+
+```{r rtrack_find}
+### Look what species are available 
+### And subset for latest version of pig
+ucscGenomes(organism = FALSE)[["db"]][grep("susScr", ucscGenomes(organism = FALSE)[["db"]])]
+genome(session) <- "susScr11"
+
+### Find out what types of data are available
+### Tracks
+track_names <- trackNames(ucscTableQuery(session))
+track_names
+
+### Tables (for a given track)
+ucscTables(
+  genome = "susScr11", 
+  track = "ensGene"
+)
+```
+```{r rtrack_find_all, eval=FALSE}
+### This triggers error when run in Rmd
+
+### Tables (for all tracks)
+rtrack_all <- lapply(track_names, function(track) {
+  tables <- ucscTables(
+    genome = "susScr11", 
+    track = track
+  )
+  tibble(
+    "Table" = tables
+  )
+}) %>%
+  bind_rows(.id = "Track")
+write_csv(
+  rtrack_all,
+  "rtracklayer_datasets_susScr11.csv"
+)
+```
+
+## Retrieve desired data
+
+```{r rtrack_retrieve}
+### Get the annotation for selected Track-Table
+Sys.time()
+anno_rtracklayer <- getTable(ucscTableQuery(
+  session, 
+  track = "ensGene",
+  table = "ensGene"
+))
+Sys.time()
+```
+
+# What format is the annotation from each source?
+
+```{r compare}
+### Look at structure
+class(anno_annotationHub)
+class(anno_biomart)
+class(anno_rtracklayer)
+
+### Look at structure
+str(anno_annotationHub)
+str(anno_biomart)
+str(anno_rtracklayer)
+
+### Look at top
+head(anno_annotationHub)
+head(anno_biomart)
+head(anno_rtracklayer)
+```
+
+# Methods
+
+```{r versions}
+### Versions
+sessioninfo::session_info()
+```
